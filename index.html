@@ -41,6 +41,13 @@ button:hover{border-color:rgba(79,214,232,.6);color:#fff}
 button.on{background:rgba(79,214,232,.16);border-color:rgba(79,214,232,.55);color:#bfeef6}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-thumb{background:rgba(96,150,205,.22);border-radius:8px}
+.diag{position:absolute;left:12px;right:12px;bottom:12px;z-index:12;display:none;
+  background:rgba(4,8,15,.97);border:1px solid var(--line2);border-radius:11px;padding:10px 12px;
+  box-shadow:0 14px 40px rgba(0,0,0,.6)}
+.diag .dline{font-family:var(--mono);font-size:11px;line-height:1.65;white-space:pre-wrap;color:var(--txt2)}
+.diag .dline.head{color:var(--gold)}
+.diag .dline.ok{color:#bfeee0}
+.diag .dline.bad{color:#ffc9ce}
 ::-webkit-scrollbar-track{background:transparent}
 
 /* SECTION: header */
@@ -271,6 +278,7 @@ footer code{font-family:var(--mono);color:var(--txt2);background:rgba(96,150,205
     </select>
     <button id="btnRefresh" type="button">立即刷新</button>
     <button id="btnColor" type="button">红涨绿跌</button>
+    <button id="btnDiag" type="button">连接诊断</button>
   </div>
 </header>
 
@@ -328,6 +336,20 @@ footer code{font-family:var(--mono);color:var(--txt2);background:rgba(96,150,205
     </div>
     <div class="legend" id="legend"></div>
     <div class="mapNote" id="mapNote">拖拽平移 · 滚轮缩放 · 点击标记查看详情</div>
+    <div class="diag" id="diagBox">
+      <div style="display:flex;gap:7px;align-items:center;margin-bottom:7px;flex-wrap:wrap">
+        <b style="color:var(--gold);font-size:12px;letter-spacing:.5px">连接诊断</b>
+        <span style="flex:1"></span>
+        <button id="diagRun" type="button">重新检测</button>
+        <button id="diagCopy" type="button" style="display:none">复制报告</button>
+        <button id="diagClose" type="button">关闭</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+        <input id="diagProxy" placeholder="可选：自建 CORS 代理前缀，如 https://my-worker.dev/?url=" style="flex:1;min-width:180px">
+        <button id="diagProxySave" type="button">保存代理</button>
+      </div>
+      <div id="diagOut" style="max-height:42vh;overflow:auto"></div>
+    </div>
     <div class="tip" id="tip"></div>
     <div class="loading" id="loading"><div style="text-align:center"><div class="spin"></div><span id="loadTxt">正在连接行情接口…</span></div></div>
   </section>
@@ -350,7 +372,7 @@ footer code{font-family:var(--mono);color:var(--txt2);background:rgba(96,150,205
 
 <!-- SECTION: footer -->
 <footer>
-  <div id="foot1">数据接口：<code>push2.eastmoney.com/api/qt/clist/get</code>（全球指数批量快照，字段 f1 精度 / f2 最新价 / f3 涨跌幅 / f4 涨跌额 / f5 成交量 / f6 成交额 / f15-f18 高低开收 / f124 更新时间戳）；分时图接口：<code>push2his.eastmoney.com/api/qt/stock/trends2/get</code>。请求优先使用 CORS fetch，失败时自动降级为 JSONP。</div>
+  <div id="foot1">数据接口：<code>push2.eastmoney.com/api/qt/clist/get</code>（全球指数批量快照，字段 f1 精度 / f2 最新价 / f3 涨跌幅 / f4 涨跌额 / f5 成交量 / f6 成交额 / f15-f18 高低开收 / f124 更新时间戳）；分时图接口：<code>push2his.eastmoney.com/api/qt/stock/trends2/get</code>。请求优先使用 CORS fetch、失败自动降级 JSONP，并依次轮询 push2 / push2delay / 1.push2 / 7.push2 / 82.push2 / 92.push2 六个镜像节点，成功的节点会被记住并优先使用；页面右上「连接诊断」可逐节点检测并导出报告。</div>
   <div id="foot2">市场状态按各交易所常规交易时段与当地时区（含夏令时）估算，未纳入节假日与临时休市安排；境外指数的成交额字段接口未提供时显示 “--”。行情仅供查看参考，不构成任何投资建议。</div>
 </footer>
 </div>
@@ -480,37 +502,92 @@ function statusOf(m){
 }
 
 /* SECTION: transport */
+var UT='fa5fd1943c7b386f172d6893dbfba10b';
+var HOSTS=['push2.eastmoney.com','push2delay.eastmoney.com','1.push2.eastmoney.com','7.push2.eastmoney.com','82.push2.eastmoney.com','92.push2.eastmoney.com'];
+var HISHOSTS=['push2his.eastmoney.com','push2hisdelay.eastmoney.com','1.push2his.eastmoney.com','82.push2his.eastmoney.com'];
+var hostBias=0,hiBias=0;
+try{
+  hostBias=Math.max(0,Math.min(HOSTS.length-1,parseInt(localStorage.getItem('gmapHost')||'0',10)||0));
+  hiBias=Math.max(0,Math.min(HISHOSTS.length-1,parseInt(localStorage.getItem('gmapHiHost')||'0',10)||0));
+}catch(e){}
+function proxyPref(){try{return (localStorage.getItem('gmapProxy')||'').trim();}catch(e){return '';}}
 var cbId=0;
-function jsonp(url){
+function jsonp(url,ms){
   return new Promise(function(res,rej){
     var name='__emq'+(++cbId)+'_'+Date.now().toString(36);
-    var s=document.createElement('script');
-    var to=setTimeout(function(){done();rej(new Error('JSONP 超时'));},12000);
-    function done(){clearTimeout(to);delete window[name];if(s.parentNode)s.parentNode.removeChild(s);}
-    window[name]=function(d){done();res(d);};
-    s.onerror=function(){done();rej(new Error('JSONP 失败'));};
+    var s=document.createElement('script');s.charset='utf-8';
+    var fired=false;
+    var to=setTimeout(function(){if(!fired){done();rej(new Error('JSONP 超时'));}},ms||6000);
+    function done(){clearTimeout(to);try{delete window[name];}catch(e){window[name]=undefined;}if(s.parentNode)s.parentNode.removeChild(s);}
+    window[name]=function(d){fired=true;done();res(d);};
+    s.onerror=function(){if(fired)return;done();rej(new Error('JSONP 脚本加载失败（网络不通、域名被拦截或证书问题）'));};
     s.src=url+(url.indexOf('?')<0?'?':'&')+'cb='+name;
     document.head.appendChild(s);
   });
 }
 function qs(o){var a=[];for(var k in o)a.push(encodeURIComponent(k)+'='+encodeURIComponent(o[k]));return a.join('&');}
-function getList(){
-  var p={pn:1,pz:200,np:1,fltt:2,invt:2,fid:'f3',
+function rotate(arr,bias){return arr.slice(bias).concat(arr.slice(0,bias));}
+function fetchJson(url){
+  var pref=proxyPref();
+  var target=pref?pref+encodeURIComponent(url):url;
+  return fetch(target,{mode:'cors',credentials:'omit'}).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    var ct=(r.headers.get('content-type')||'');
+    return r.text().then(function(t){
+      if(ct.indexOf('json')<0&&t.charAt(0)!=='{'&&t.charAt(0)!=='[')throw new Error('返回非 JSON（可能被网关或插件拦截）');
+      return JSON.parse(t);
+    });
+  });
+}
+function listParams(){
+  return {pn:1,pz:200,np:1,fltt:2,invt:2,fid:'f3',ut:UT,
     fields:FIELDS,fs:MKT.map(function(m){return 'i:'+m.secid;}).join(','),_:Date.now()};
-  var url=API_LIST+'?'+qs(p);
-  return fetch(url,{mode:'cors',credentials:'omit'}).then(function(r){
-    if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
-  }).then(function(d){transport='CORS';return d;})
-   .catch(function(e){
-    return jsonp(url).then(function(d){transport='JSONP';return d;});
+}
+function remember(key,idx){try{localStorage.setItem(key,String(idx));}catch(e){}}
+function getList(){
+  var p=listParams(),order=rotate(HOSTS,hostBias),i=0,lastErr=null;
+  function nextFetch(){
+    if(i>=order.length)return Promise.reject(lastErr||new Error('全部节点 fetch 失败'));
+    var h=order[i++];
+    return fetchJson('https://'+h+'/api/qt/clist/get?'+qs(p)).then(function(d){
+      hostBias=HOSTS.indexOf(h);remember('gmapHost',hostBias);
+      transport='CORS·'+h.split('.')[0];return d;
+    }).catch(function(e){lastErr=e;return nextFetch();});
+  }
+  return nextFetch().catch(function(eFetch){
+    var o2=rotate(HOSTS,hostBias).slice(0,3),j=0,lastErr2=eFetch;
+    function nextJsonp(){
+      if(j>=o2.length)return Promise.reject(new Error('fetch 与 JSONP 均失败（最后：'+((lastErr2&&lastErr2.message)||'?')+'）'));
+      var h=o2[j++];
+      return jsonp('https://'+h+'/api/qt/clist/get?'+qs(p)).then(function(d){
+        hostBias=HOSTS.indexOf(h);remember('gmapHost',hostBias);
+        transport='JSONP·'+h.split('.')[0];return d;
+      }).catch(function(e){lastErr2=e;return nextJsonp();});
+    }
+    return nextJsonp();
   });
 }
 function getTrend(secid){
-  var p={secid:secid,fields1:'f1,f2,f3,f8',fields2:'f51,f53',iscr:0,ndays:1,_:Date.now()};
-  var url=API_TREND+'?'+qs(p);
-  return fetch(url,{mode:'cors',credentials:'omit'}).then(function(r){
-    if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
-  }).catch(function(){return jsonp(url);});
+  var p={secid:secid,fields1:'f1,f2,f3,f8',fields2:'f51,f53',iscr:0,ndays:1,ut:UT,_:Date.now()};
+  var order=rotate(HISHOSTS,hiBias),i=0,lastErr=null;
+  function nextFetch(){
+    if(i>=order.length)return Promise.reject(lastErr||new Error('分时节点不可达'));
+    var h=order[i++];
+    return fetchJson('https://'+h+'/api/qt/stock/trends2/get?'+qs(p)).then(function(d){
+      hiBias=HISHOSTS.indexOf(h);remember('gmapHiHost',hiBias);return d;
+    }).catch(function(e){lastErr=e;return nextFetch();});
+  }
+  return nextFetch().catch(function(){
+    var o2=rotate(HISHOSTS,hiBias),j=0;
+    function nextJsonp(){
+      if(j>=o2.length)return Promise.reject(lastErr||new Error('分时 JSONP 失败'));
+      var h=o2[j++];
+      return jsonp('https://'+h+'/api/qt/stock/trends2/get?'+qs(p),8000).then(function(d){
+        hiBias=HISHOSTS.indexOf(h);remember('gmapHiHost',hiBias);return d;
+      }).catch(function(e){lastErr=e;return nextJsonp();});
+    }
+    return nextJsonp();
+  });
 }
 
 /* SECTION: fetch-cycle */
@@ -544,7 +621,7 @@ function refresh(silent){
     failCount++;
     var stale=lastUpd?'（保留 '+mdhm(Math.floor(lastUpd/1000))+' 的数据）':'';
     setNet('err','连接失败 '+failCount+' 次 '+stale);
-    if(!lastUpd){$('loadTxt').textContent='行情接口连接失败：'+(e&&e.message||'网络不可用')+'，正在自动重试…';}
+    if(!lastUpd){$('loadTxt').textContent='行情接口连接失败：'+(e&&e.message||'网络不可用')+'。已依次尝试 '+HOSTS.length+' 个行情节点，正在自动重试；可点右上「连接诊断」查看每个节点的具体原因…';}
     cdLeft=Math.min(interval/1000,Math.max(5,failCount*5));
   });
 }
@@ -1294,6 +1371,26 @@ function bindEvents(){
     syncColors();
     this.textContent=colorMode==='cn'?'红涨绿跌':'绿涨红跌';
   });
+  $('btnDiag').addEventListener('click',function(){
+    var b=$('diagBox');
+    if(b.style.display==='block'){b.style.display='none';return;}
+    b.style.display='block';
+    try{$('diagProxy').value=proxyPref();}catch(e){}
+    runDiag();
+  });
+  $('diagRun').addEventListener('click',function(){runDiag();});
+  $('diagClose').addEventListener('click',function(){$('diagBox').style.display='none';});
+  $('diagCopy').addEventListener('click',function(){
+    var t=diagReport();
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){$('diagCopy').textContent='已复制';});}
+    else{var ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();
+      try{document.execCommand('copy');$('diagCopy').textContent='已复制';}catch(e){}
+      document.body.removeChild(ta);}
+  });
+  $('diagProxySave').addEventListener('click',function(){
+    try{localStorage.setItem('gmapProxy',$('diagProxy').value.trim());}catch(e){}
+    this.textContent='已保存';refresh();
+  });
   Array.prototype.forEach.call(document.querySelectorAll('.mobTabs button'),function(b){
     b.addEventListener('click',function(){setMob(b.dataset.mob);});
   });
@@ -1309,6 +1406,44 @@ function bindEvents(){
     if(document.hidden){stopPoll();}
     else{startPoll();refresh(true);}
   });
+}
+
+/* SECTION: diagnostics */
+var diagBusy=false;
+function diagLine(txt,kind){
+  var out=$('diagOut');
+  var d=document.createElement('div');d.className='dline'+(kind?' '+kind:'');d.textContent=txt;
+  out.appendChild(d);out.scrollTop=out.scrollHeight;
+}
+function diagProbe(host){
+  var p={pn:1,pz:1,np:1,fltt:2,invt:2,fid:'f3',ut:UT,fields:'f2,f12',fs:'i:100.HSI',_:Date.now()};
+  var u='https://'+host+'/api/qt/clist/get?'+qs(p);
+  return fetchJson(u).then(function(d){
+    var rows=(d&&d.data&&d.data.diff)||[];
+    diagLine('   CORS 直连：OK（'+rows.length+' 条，最新价 '+((rows[0]||{}).f2)+ '）','ok');
+  }).catch(function(e){
+    diagLine('   CORS 直连：失败 — '+e.message,'bad');
+    return jsonp(u,8000).then(function(){diagLine('   JSONP：OK','ok');})
+      .catch(function(e2){diagLine('   JSONP：失败 — '+e2.message,'bad');});
+  });
+}
+function runDiag(){
+  if(diagBusy)return;diagBusy=true;
+  $('diagOut').innerHTML='';$('diagCopy').style.display='none';
+  diagLine('检测时间：'+new Date().toLocaleString('zh-CN'),'head');
+  diagLine('页面来源：'+location.protocol+'//'+location.host+(location.pathname||''),'head');
+  diagLine('浏览器在线：'+(navigator.onLine?'是':'否')+'　代理前缀：'+(proxyPref()||'无'),'head');
+  var seq=Promise.resolve();
+  HOSTS.forEach(function(h){
+    seq=seq.then(function(){diagLine('节点 '+h,'head');return diagProbe(h);});
+  });
+  seq.then(function(){
+    diagLine('—— 检测完成：点「复制报告」发给我，我来判断卡在哪一层 ——','head');
+    $('diagCopy').style.display='';diagBusy=false;
+  });
+}
+function diagReport(){
+  return Array.prototype.map.call($('diagOut').children,function(x){return x.textContent;}).join('\n');
 }
 
 /* SECTION: loop */
