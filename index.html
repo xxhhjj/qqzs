@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+<!-- 网络层已按 GitHub Pages(HTTPS) 环境重写：no-referrer + 双主机 + fetch/JSONP 自动回退 -->
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>全球交易所实时行情地图</title>
 <style>
@@ -423,8 +423,11 @@ var MKT=[
 var REGIONS=[{k:'all',n:'全部'},{k:'asia',n:'亚洲'},{k:'eu',n:'欧洲'},{k:'am',n:'美洲'},{k:'oc',n:'大洋洲'},{k:'macro',n:'商品汇率'}];
 var REGNAME={asia:'亚洲',eu:'欧洲',am:'美洲',oc:'大洋洲',macro:'商品 · 汇率 · 宏观'};
 var CLOCKS=[{c:'上海',tz:'Asia/Shanghai',s:'1.000001'},{c:'东京',tz:'Asia/Tokyo',s:'100.N225'},{c:'孟买',tz:'Asia/Kolkata',s:'100.SENSEX'},{c:'伦敦',tz:'Europe/London',s:'100.FTSE'},{c:'纽约',tz:'America/New_York',s:'100.SPX'},{c:'悉尼',tz:'Australia/Sydney',s:'100.AS51'}];
-var API_LIST='https://push2.eastmoney.com/api/qt/clist/get';
-var API_TREND='https://push2his.eastmoney.com/api/qt/stock/trends2/get';
+/* 行情接口配置：token + 主/备双主机（备用机为 delay 节点，主站被拦时仍可取数） */
+var UT='bd1d9ddb04089700cf9c27f6f7426281';
+var PUSH_HOSTS=['push2.eastmoney.com','push2delay.eastmoney.com'];
+var HIS_HOSTS=['push2his.eastmoney.com','push2hisdelay.eastmoney.com'];
+var API_LIST='/api/qt/clist/get', API_TREND='/api/qt/stock/trends2/get';
 var FIELDS='f1,f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18,f124';
 
 /* SECTION: state */
@@ -480,38 +483,66 @@ function statusOf(m){
   return {k:'off',t:'休市'};
 }
 
-/* SECTION: transport */
+/* SECTION: transport —— 适配 GitHub Pages(HTTPS)
+   要点：① 不发 Referer（东财 CDN 对第三方来源做防盗链校验）
+        ② 主/备双主机 × (CORS fetch → JSONP) 共 4 条通路依次重试
+        ③ 返回 200 但 data 为空也算失败，继续换通路
+        ④ 所有请求带 ut token、带超时、禁缓存 */
 var cbId=0;
-function jsonp(url){
+function qs(o){var a=[];for(var k in o)a.push(encodeURIComponent(k)+'='+encodeURIComponent(o[k]));return a.join('&');}
+function fetchJSON(host,path,params,timeout){
+  var ctl=new AbortController();
+  var tm=setTimeout(function(){ctl.abort();},timeout||6500);
+  return fetch('https://'+host+path+'?'+qs(Object.assign({},params,{_:Date.now()})),
+    {signal:ctl.signal,mode:'cors',credentials:'omit',cache:'no-store',referrerPolicy:'no-referrer'})
+   .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+   .then(function(d){if(!d||!d.data)throw new Error('接口返回空数据');return d;})
+   .finally(function(){clearTimeout(tm);});
+}
+function jsonp(host,path,params,timeout){
   return new Promise(function(res,rej){
     var name='__emq'+(++cbId)+'_'+Date.now().toString(36);
-    var s=document.createElement('script');
-    var to=setTimeout(function(){done();rej(new Error('JSONP 超时'));},12000);
-    function done(){clearTimeout(to);delete window[name];if(s.parentNode)s.parentNode.removeChild(s);}
-    window[name]=function(d){done();res(d);};
-    s.onerror=function(){done();rej(new Error('JSONP 失败'));};
-    s.src=url+(url.indexOf('?')<0?'?':'&')+'cb='+name;
+    var s=document.createElement('script'), done=false;
+    var tm=setTimeout(function(){fin(rej,new Error('JSONP 超时'));},timeout||9000);
+    function fin(fn,arg){
+      if(done)return;done=true;clearTimeout(tm);
+      try{delete window[name];}catch(e){window[name]=undefined;}
+      if(s.parentNode)s.parentNode.removeChild(s);
+      fn(arg);
+    }
+    window[name]=function(d){
+      if(!d||!d.data){fin(rej,new Error('JSONP 返回空数据'));return;}
+      fin(res,d);
+    };
+    s.onerror=function(){fin(rej,new Error('JSONP 失败'));};
+    s.referrerPolicy='no-referrer';
+    s.src='https://'+host+path+'?'+qs(Object.assign({},params,{cb:name,_:Date.now()}));
     document.head.appendChild(s);
   });
 }
-function qs(o){var a=[];for(var k in o)a.push(encodeURIComponent(k)+'='+encodeURIComponent(o[k]));return a.join('&');}
+function smartGet(hosts,path,params){
+  var i=0, err=null;
+  function next(){
+    if(i>=hosts.length)return Promise.reject(err||new Error('所有行情主机均不可用'));
+    var h=hosts[i++];
+    return fetchJSON(h,path,params)
+      .then(function(d){transport='CORS · '+h;return d;})
+      .catch(function(e){err=e;
+        return jsonp(h,path,params)
+          .then(function(d){transport='JSONP · '+h;return d;})
+          .catch(function(e2){err=e2;return next();});
+      });
+  }
+  return next();
+}
 function getList(){
-  var p={pn:1,pz:200,np:1,fltt:2,invt:2,fid:'f3',
-    fields:FIELDS,fs:MKT.map(function(m){return 'i:'+m.secid;}).join(','),_:Date.now()};
-  var url=API_LIST+'?'+qs(p);
-  return fetch(url,{mode:'cors',credentials:'omit'}).then(function(r){
-    if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
-  }).then(function(d){transport='CORS';return d;})
-   .catch(function(e){
-    return jsonp(url).then(function(d){transport='JSONP';return d;});
-  });
+  var p={pn:1,pz:200,np:1,ut:UT,fltt:2,invt:2,fid:'f3',
+    fields:FIELDS,fs:MKT.map(function(m){return 'i:'+m.secid;}).join(',')};
+  return smartGet(PUSH_HOSTS,API_LIST,p);
 }
 function getTrend(secid){
-  var p={secid:secid,fields1:'f1,f2,f3,f8',fields2:'f51,f53',iscr:0,ndays:1,_:Date.now()};
-  var url=API_TREND+'?'+qs(p);
-  return fetch(url,{mode:'cors',credentials:'omit'}).then(function(r){
-    if(!r.ok)throw new Error('HTTP '+r.status);return r.json();
-  }).catch(function(){return jsonp(url);});
+  var p={secid:secid,ut:UT,fields1:'f1,f2,f3,f8',fields2:'f51,f53',iscr:0,ndays:1};
+  return smartGet(HIS_HOSTS,API_TREND,p);
 }
 
 /* SECTION: fetch-cycle */
@@ -521,7 +552,9 @@ function setNet(state,txt){
 function refresh(silent){
   if(!silent)setNet('warn','拉取中…');
   return getList().then(function(d){
-    var rows=(d&&d.data&&d.data.diff)||[];
+    var diff=(d&&d.data&&d.data.diff)||[];
+    /* 东财在 fs=i:多代码 时 diff 可能返回 {"0":{...}} 对象而非数组，两种都要兼容 */
+    var rows=Array.isArray(diff)?diff:Object.keys(diff).map(function(k){return diff[k];});
     if(!rows.length)throw new Error('接口返回空数据');
     var nowSec=Math.floor(Date.now()/1000), got=0;
     rows.forEach(function(r){
